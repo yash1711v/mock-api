@@ -1,10 +1,16 @@
 const jsonServer = require("json-server");
+const https = require("https");
 const path = require("path");
+const { URL } = require("url");
 
 const server = jsonServer.create();
 const dbFile = path.join(__dirname, "db.json");
 const router = jsonServer.router(dbFile);
 const middlewares = jsonServer.defaults();
+const openRouterApiUrl = process.env.OPENROUTER_API_URL || "https://openrouter.ai/api/v1/chat/completions";
+const openRouterApiKey = process.env.OPENROUTER_API_KEY || "";
+const openRouterModel = process.env.OPENROUTER_MODEL || "openrouter/free";
+const maxChatContextMessages = 12;
 
 const suggestionCatalog = [
   { title: "Summarize my notes", description: "Get a concise summary of your text" },
@@ -103,6 +109,163 @@ function buildAssistantReply(message) {
   return `Mock assistant reply: I received "${message.trim()}" and generated a placeholder response for the assignment flow.`;
 }
 
+function performJsonPost(requestUrl, payload, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(requestUrl);
+    const body = JSON.stringify(payload);
+
+    const request = https.request(
+      {
+        method: "POST",
+        hostname: url.hostname,
+        path: `${url.pathname}${url.search}`,
+        port: url.port || 443,
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+          ...headers,
+        },
+      },
+      (response) => {
+        let rawResponse = "";
+
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          rawResponse += chunk;
+        });
+
+        response.on("end", () => {
+          let parsedResponse = null;
+
+          if (rawResponse) {
+            try {
+              parsedResponse = JSON.parse(rawResponse);
+            } catch (error) {
+              reject(new Error("AI provider returned a non-JSON response."));
+              return;
+            }
+          }
+
+          if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
+            const providerMessage =
+              typeof parsedResponse?.error?.message === "string"
+                ? parsedResponse.error.message
+                : `AI provider request failed with status ${response.statusCode || 500}.`;
+            const requestError = new Error(providerMessage);
+
+            requestError.code = "AI_PROVIDER_ERROR";
+            reject(requestError);
+            return;
+          }
+
+          resolve(parsedResponse);
+        });
+      }
+    );
+
+    request.on("error", (error) => {
+      error.code = "AI_PROVIDER_ERROR";
+      reject(error);
+    });
+
+    request.write(body);
+    request.end();
+  });
+}
+
+function toOpenRouterRole(sender) {
+  if (sender === "assistant") {
+    return "assistant";
+  }
+
+  return "user";
+}
+
+function buildChatContextMessages(message) {
+  const priorMessages = getHistoryCollection()
+    .slice(-maxChatContextMessages)
+    .filter((entry) => typeof entry?.message === "string" && entry.message.trim())
+    .map((entry) => ({
+      role: toOpenRouterRole(entry.sender),
+      content: entry.message.trim(),
+    }));
+
+  return [
+    {
+      role: "system",
+      content:
+        "You are a concise API assistant. Answer directly, stay practical, and keep responses short unless the user asks for more detail.",
+    },
+    ...priorMessages,
+    {
+      role: "user",
+      content: message,
+    },
+  ];
+}
+
+function extractReplyText(content) {
+  if (typeof content === "string") {
+    return content.trim();
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") {
+          return part;
+        }
+
+        if (part && typeof part.text === "string") {
+          return part.text;
+        }
+
+        return "";
+      })
+      .join("")
+      .trim();
+  }
+
+  return "";
+}
+
+async function generateAssistantReply(message) {
+  if (!openRouterApiKey) {
+    return {
+      reply: buildAssistantReply(message),
+      source: "mock",
+      model: null,
+    };
+  }
+
+  const response = await performJsonPost(
+    openRouterApiUrl,
+    {
+      model: openRouterModel,
+      messages: buildChatContextMessages(message),
+    },
+    {
+      Authorization: `Bearer ${openRouterApiKey}`,
+    }
+  );
+
+  const reply = extractReplyText(response?.choices?.[0]?.message?.content);
+
+  if (!reply) {
+    const error = new Error("AI provider returned an empty reply.");
+
+    error.code = "AI_PROVIDER_ERROR";
+    throw error;
+  }
+
+  return {
+    reply,
+    source: "openrouter",
+    model: typeof response?.model === "string" ? response.model : openRouterModel,
+  };
+}
+
 function getHistoryCollection() {
   const history = router.db.get("history").value();
   return Array.isArray(history) ? history : [];
@@ -141,7 +304,7 @@ server.get("/suggestions", (req, res) => {
   });
 });
 
-server.post("/chat", (req, res) => {
+server.post("/chat", async (req, res) => {
   const message = typeof req.body?.message === "string" ? req.body.message.trim() : "";
 
   if (!message) {
@@ -152,13 +315,28 @@ server.post("/chat", (req, res) => {
     return;
   }
 
-  const reply = buildAssistantReply(message);
-  persistChatExchange(message, reply);
+  try {
+    const assistantResponse = await generateAssistantReply(message);
 
-  res.status(200).json({
-    status: "success",
-    reply,
-  });
+    persistChatExchange(message, assistantResponse.reply);
+
+    res.status(200).json({
+      status: "success",
+      reply: assistantResponse.reply,
+      source: assistantResponse.source,
+      model: assistantResponse.model,
+    });
+  } catch (error) {
+    const messageText =
+      error && typeof error.message === "string"
+        ? error.message
+        : "Unable to generate a chat response right now.";
+
+    res.status(502).json({
+      status: "error",
+      message: messageText,
+    });
+  }
 });
 
 server.get("/chat/history", (req, res) => {
