@@ -1,0 +1,25 @@
+{
+  "suggestions": [
+    {
+      "id": 1,
+      "title": "Summarize my notes",
+      "description": "Get a concise summary of your text"
+    },
+    {
+      "id": 2,
+      "title": "Generate email reply",
+      "description": "Create a professional email response"
+    }
+  ],
+  "chat": [],
+  "history": [
+    {
+      "sender": "user",
+      "message": "What is Flutter?"
+    },
+    {
+      "sender": "assistant",
+      "message": "Flutter is an open-source UI toolkit by Google"
+    }
+  ]
+}
