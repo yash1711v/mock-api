@@ -1,16 +1,5 @@
 {
-  "suggestions": [
-    {
-      "id": 1,
-      "title": "Summarize my notes",
-      "description": "Get a concise summary of your text"
-    },
-    {
-      "id": 2,
-      "title": "Generate email reply",
-      "description": "Create a professional email response"
-    }
-  ],
+  "suggestions": [],
   "chat": [],
   "history": [
     {
@@ -19,7 +8,7 @@
     },
     {
       "sender": "assistant",
-      "message": "Flutter is an open-source UI toolkit by Google"
+      "message": "Flutter is an open-source UI toolkit by Google for building apps from a single codebase."
     }
   ]
 }
